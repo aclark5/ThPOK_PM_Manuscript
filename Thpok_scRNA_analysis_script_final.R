@@ -8,6 +8,93 @@ library("ggplot2")
 library(reshape2)
 library(ggpubr)
 library(scales)
+
+
+
+samples <- list(
+  list("path" = "/Singlecellrna/8_samples/cellranger_count/HC4-ThN-D7-iono-1_out/outs/filtered_feature_bc_matrix", "project" = "HC4_iono"),
+  list("path" = "/Singlecellrna/8_samples/cellranger_count/HC5-ThN-D7-iono-1_out/outs/filtered_feature_bc_matrix", "project" = "HC5_iono"),
+  list("path" = "/Singlecellrna/8_samples/cellranger_count/LCKE-ThN-D7-iono-1_out/outs/filtered_feature_bc_matrix", "project" = "LCKE_iono"),
+  list("path" = "/Singlecellrna/8_samples/cellranger_count/LKKS-ThN-D7-iono-1_out/outs/filtered_feature_bc_matrix", "project" = "LKKS_iono"),
+  list("path" = "/Singlecellrna/8_samples/cellranger_count/HC4-ThN-D7-Neg-1_out/outs/filtered_feature_bc_matrix", 
+       "project" = "HC4_Neg"),
+  list("path" = "/Singlecellrna/8_samples/cellranger_count/HC5-ThN-D7-Neg-1_out/outs/filtered_feature_bc_matrix", 
+       "project" = "HC5_Neg"),
+  list("path" = "/Singlecellrna/8_samples/cellranger_count/LCKE-ThN-D7-Neg-1_out/outs/filtered_feature_bc_matrix", 
+       "project" = "LCKE_Neg"),
+  list("path" = "/Singlecellrna/8_samples/cellranger_count/LKKS-ThN-D7-Neg-1_out/outs/filtered_feature_bc_matrix", 
+       "project" = "LKKS_Neg")
+)
+
+# Initialize a list to store Seurat objects
+seurat_objects <- list()
+
+# Process each sample
+for (sample in samples) {
+  input_matrix <- sample$path
+  print(input_matrix)
+  project_name <- sample$project
+  print(project_name)
+  
+  # Read and process the data
+  seurat_object <- Seurat::Read10X(input_matrix)
+  seurat_object <- Seurat::CreateSeuratObject(counts = seurat_object, project = project_name, min.cells = 3, min.features = 200)
+  seurat_object[["percent.mt"]] <- Seurat::PercentageFeatureSet(seurat_object, pattern = "^MT-")
+  seurat_object[["percent.rb"]] <- Seurat::PercentageFeatureSet(seurat_object, pattern = "^RP[SL]")
+  seurat_object[["percent.hb"]] <- Seurat::PercentageFeatureSet(seurat_object, pattern = "^HB[A-Z0-9]*")
+  
+  # Run external Python script for doublet detection (assumed to be run manually or separately)
+  system(paste("python /Singlecellrna/8_samples/cellranger_count/my_scrublet_run.py", input_matrix))
+  
+  # Load doublet results
+  doublets <- read.table(file.path(input_matrix, "doublet.txt"), header = TRUE, sep = ",", row.names = 1)
+  colnames(doublets) <- c("Doublet_score", "Is_doublet")
+  seurat_object <- Seurat::AddMetaData(seurat_object, doublets)
+  
+  # Print head of metadata
+  print(head(seurat_object[[]]))
+  
+  # Filter the Seurat object 200, 9000, 20% mt
+  seurat_object <- subset(seurat_object, subset = nCount_RNA > 1000 & nFeature_RNA > 200 & nFeature_RNA < 7500 & percent.mt < 15 & Doublet_score < 0.22 & percent.hb < 1)
+  
+  
+  # Store the object in the list with a named key
+  seurat_objects[[project_name]] <- seurat_object
+}
+
+# scale
+# Normalize and find variable features for each Seurat object
+for (name in names(seurat_objects)) {
+  seurat_objects[[name]] <- NormalizeData(seurat_objects[[name]], verbose = FALSE)
+  seurat_objects[[name]] <- FindVariableFeatures(seurat_objects[[name]], selection.method = "vst", nfeatures = 2000)
+}
+
+T_anchors <- Seurat::FindIntegrationAnchors(object.list = seurat_objects, dims = 1:30)
+seurat_integrated  <- Seurat::IntegrateData(anchorset = T_anchors, dims = 1:30)
+
+saveRDS(seurat_integrated, file = "/Singlecellrna/8_samples/seurat_out/T_seurat_integrated.rds")
+
+
+# read data
+seurat_integrated <- readRDS("/Singlecellrna/8_samples/seurat_out/T_seurat_integrated.rds")
+all.genes <- rownames(seurat_integrated)
+seurat_integrated <- Seurat::ScaleData(seurat_integrated, features = all.genes, verbose = F)
+seurat_integrated <- Seurat::RunPCA(seurat_integrated, npcs = 30, features = Seurat::VariableFeatures(object = seurat_integrated), verbose = F)
+
+
+saveRDS(seurat_integrated, file = "/Singlecellrna/8_samples/seurat_out/T_seurat_integrated_pca30.rds")
+
+
+seurat_integrated <- readRDS("/Singlecellrna/8_samples/seurat_out/T_seurat_integrated_pca30.rds")
+seurat_integrated <- Seurat::FindNeighbors(seurat_integrated, dims = 1:20)
+seurat_integrated <- Seurat::FindClusters(seurat_integrated, resolution = 1)
+seurat_integrated <- Seurat::RunUMAP(seurat_integrated, reduction = "pca", dims = 1:20, verbose = F)
+saveRDS(seurat_integrated, file = "/Singlecellrna/8_samples/seurat_out/T_seurat_umap_d20_mt15_8_samples.rds")
+
+
+# annotation
+T_seurat_d20_mt15_8_samples <- readRDS("./T_seurat_umap_d20_mt15_8_samples.rds")
+
 # feature plot
 DefaultAssay(T_seurat_d20_mt15_8_samples) <- "RNA"
 marker <- c("CD3E","CD3D","CD4","CD8A","NCAM1","FCGR3A")
